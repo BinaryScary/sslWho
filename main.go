@@ -120,8 +120,8 @@ func main() {
 
 	s := goscan.SetupScanner(options.Range, ports, options.Requests, options.Timeout)
 
-	// add buffer so cert parse doesn't block PortState channel
-	c := make(chan goscan.PortState, 10000)
+	// TODO: add buffer so cert parse doesn't block PortState channel
+	c := make(chan goscan.PortState, 100000)
 	e := make(chan error, 1)
 	go s.Scan(c, e)
 	// range over channel only returns one variable
@@ -135,7 +135,6 @@ func main() {
 				log.Printf("%s port %v open", i.Addr, i.Port)
 
 				// does not supply SNI therefore IP's with multiple certificates (virtualhosts) will not return proper cert, SNI requires a hostname not a IP
-				// TODO: requery with hostname from 302 redirect?
 				conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%v", i.Addr, i.Port), time.Duration(options.Timeout)*time.Millisecond)
 				if err != nil {
 					log.Printf("timeout on %s: %v", i.Addr, err)
