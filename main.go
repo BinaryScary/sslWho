@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/tls"
 	"crypto/x509/pkix"
 	"database/sql"
@@ -8,7 +9,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
+	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -90,18 +94,178 @@ func addCert(cert tls.ConnectionState, database *sql.DB, state goscan.PortState)
 
 }
 
+func search(domain string, database *sql.DB, quiet bool) {
+	query := "select * from certs where dnsnames LIKE ? OR emails LIKE ? OR uris LIKE ? OR subnames LIKE ?"
+	rows, err := database.Query(query, domain, domain, domain, domain)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+
+	// remove all non-alphanumeric from string
+	reg, err := regexp.Compile("[^a-zA-Z0-9]+")
+	if err != nil {
+		log.Fatal(err)
+	}
+	pString := reg.ReplaceAllString(domain, "")
+
+	// iterate through query result rows
+	for rows.Next() {
+		var (
+			host     string
+			port     int
+			dnsnames string
+			emails   string
+			ipaddrs  string
+			uris     string
+			subnames string
+		)
+		// grab column values from row
+		if err := rows.Scan(&host, &port, &dnsnames, &emails, &ipaddrs, &uris, &subnames); err != nil {
+			log.Fatal(err)
+		}
+
+		if quiet {
+			log.Printf("%s\n", host)
+		} else {
+			log.Printf("%s : ", host)
+			if strings.Contains(dnsnames, pString) {
+				log.Printf("	%s ", dnsnames)
+			}
+			if strings.Contains(emails, pString) {
+				log.Printf("	%s ", emails)
+			}
+			if strings.Contains(uris, pString) {
+				log.Printf("	%s ", uris)
+			}
+			if strings.Contains(subnames, pString) {
+				log.Printf("	%s ", subnames)
+			}
+			// log.Printf("%s:	%s	%s	%s	%s\n", host, dnsnames, emails, uris, subnames)
+		}
+	}
+}
+
+func getBB(database *sql.DB) {
+	resp, err := http.Get("https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/master/data/wildcards.txt")
+	if err != nil {
+		log.Print("[!] error pulling bugbounty data")
+	}
+	defer resp.Body.Close()
+	s := bufio.NewScanner(resp.Body)
+	for s.Scan() {
+		qString := strings.Replace(s.Text(), "*", "%", -1)
+		qString += "%"
+
+		query := "select * from certs where dnsnames LIKE ? OR emails LIKE ? OR uris LIKE ? OR subnames LIKE ?"
+		rows, err := database.Query(query, qString, qString, qString, qString)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer rows.Close()
+
+		// iterate through query result rows
+		for rows.Next() {
+			var (
+				host     string
+				port     int
+				dnsnames string
+				emails   string
+				ipaddrs  string
+				uris     string
+				subnames string
+			)
+			// grab column values from row
+			if err := rows.Scan(&host, &port, &dnsnames, &emails, &ipaddrs, &uris, &subnames); err != nil {
+				log.Fatal(err)
+			}
+
+			log.Printf("%s\n", host)
+		}
+
+	}
+	if err := s.Err(); err != nil {
+		log.Print("[!] error pulling bugbounty data")
+	}
+
+}
+
+func logDomainIPs(domains []string, ip string, port int) {
+	for _, s := range domains {
+		log.Printf("%s,%s,%d", s, ip, port)
+	}
+}
+
+// implement vhost checks
+func getDomains(ipList string, database *sql.DB) {
+	file, err := os.Open(ipList)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	r, _ := regexp.Compile("(\\w{2,63}[\\.])+\\w{2,63}")
+
+	s := bufio.NewScanner(file)
+	for s.Scan() {
+		query := "select * from certs where host=?"
+		rows, err := database.Query(query, s.Text())
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer rows.Close()
+
+		// iterate through query result rows
+		for rows.Next() {
+			var (
+				host     string
+				port     int
+				dnsnames string
+				emails   string
+				ipaddrs  string
+				uris     string
+				subnames string
+			)
+			// grab column values from row
+			if err := rows.Scan(&host, &port, &dnsnames, &emails, &ipaddrs, &uris, &subnames); err != nil {
+				log.Fatal(err)
+			}
+
+			dNames := r.FindAllString(dnsnames, -1)
+			dSubNames := r.FindAllString(subnames, -1)
+			dUris := r.FindAllString(subnames, -1)
+			logDomainIPs(dNames, s.Text(), port)
+			logDomainIPs(dSubNames, s.Text(), port)
+			logDomainIPs(dUris, s.Text(), port)
+		}
+
+	}
+	if err := s.Err(); err != nil {
+		log.Print("[!] error reading IPs from file")
+	}
+}
+
 func main() {
 	// remove timestamp from logs
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
+	log.SetOutput(os.Stdout)
 
 	options := &goscan.Options{}
 	flag.StringVar(&options.Range, "r", "", "IP/CIDR Range (Required)")
 	flag.StringVar(&options.Ports, "p", "443", "Comma separated ports")
 	flag.IntVar(&options.Timeout, "t", 300, "Timeout in milliseconds after request is sent")
 	flag.IntVar(&options.Requests, "c", 500, "Requests per second")
+	var query string
+	flag.StringVar(&query, "s", "", "Run a search query on the database")
+	var ipList string
+	flag.StringVar(&ipList, "d", "", "Returns the domains found for a list of IPs")
+	quiet := flag.Bool("q", false, "Output only IPs in search query")
+	bb := flag.Bool("b", false, "Get all bugbounty IPs")
+
 	flag.Parse()
 
-	if options.Range == "" {
+	// check if a required flag is used
+	if options.Range == "" && query == "" && !*bb && ipList == "" {
 		flag.Usage()
 		return
 	}
@@ -114,6 +278,27 @@ func main() {
 	}
 
 	database, _ := sql.Open("sqlite3", "./sslWho.db")
+	defer database.Close()
+
+	// query the database for specific domain
+	if query != "" {
+		search(query, database, *quiet)
+		return
+	}
+
+	// print out bug bounty ips addresses
+	if *bb {
+		getBB(database)
+		return
+	}
+
+	// print out domains for corresponding IPs in a list
+	// usefully when trying to find vHosts
+	if ipList != "" {
+		getDomains(ipList, database)
+		return
+	}
+
 	// compound key (host,port)
 	statement, _ := database.Prepare("CREATE TABLE IF NOT EXISTS certs (host TEXT , port INT, dnsnames TEXT, emails TEXT, ipaddrs TEXT, uris TEXT, subnames TEXT, PRIMARY KEY (host,port))")
 	statement.Exec()

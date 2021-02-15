@@ -2,3 +2,8 @@ sslWho.db
 .vscode
 .DS_Store
 ./sslwho
+bbIPs.txt
+bbvhost.csv
+bburls.txt
+vhostChecker
+vhostChecker/*
